@@ -2,6 +2,10 @@
 
 Sistema completo para backup automático de bancos de dados PostgreSQL com upload para AWS S3 e gerenciamento de retenção.
 
+**🎯 Arquitetura Simples:**
+- **`setup.sh`** - Instala tudo automaticamente (execute uma vez)
+- **`run.sh`** - Executa backups (use diariamente)
+
 ## Funcionalidades
 
 - ✅ Backup automático de múltiplos databases PostgreSQL
@@ -58,32 +62,40 @@ DB_NAMES=database1,database2,database3
 
 ```
 db-backup/
-├── main.py              # Script principal
-├── backup.py            # Módulo de backup
-├── retention.py         # Módulo de retenção
-├── config.py           # Configurações
-├── run.sh              # Script de execução
-├── requirements.txt    # Dependências Python
-├── .env.example       # Exemplo de configuração
-└── README.md          # Esta documentação
+├── setup.sh                    # 🔧 Script de instalação e configuração
+├── run.sh                      # 🚀 Script de execução (logs em ./logs/)
+├── run_sudo.sh                 # 🚀 Script de execução com sudo (logs em /var/log/)
+├── main.py                     # Script principal Python
+├── backup.py                   # Módulo de backup
+├── retention.py                # Módulo de retenção
+├── config.py                   # Configurações
+├── requirements.txt            # Dependências Python
+├── .env.example               # Exemplo de configuração
+├── test_dependencies.py        # Teste de dependências
+├── test_backup_dry_run.py      # Teste sem PostgreSQL
+├── test_s3_connection.py       # Teste de conexão S3
+├── status.sh                   # Script de verificação de status
+└── README.md                  # Esta documentação
 ```
 
 ## Instalação
 
-### Instalação Rápida (Recomendada)
+### Instalação Automática (Recomendada)
 
 ```bash
-# Execute o script de setup automático
+# Execute apenas um comando para instalar tudo
 ./setup.sh
 ```
 
 O script irá:
-- ✅ Verificar dependências do sistema
-- ✅ Instalar python3-venv se necessário
+- ✅ Verificar e instalar Python 3 e python3-venv
+- ✅ Verificar e instalar PostgreSQL client tools
 - ✅ Criar ambiente virtual Python
-- ✅ Instalar todas as dependências
+- ✅ Instalar todas as dependências (boto3, psycopg2, python-dotenv)
 - ✅ Criar arquivo .env de exemplo
-- ✅ Testar a instalação
+- ✅ Configurar diretórios e permissões
+- ✅ Executar testes de validação
+- ✅ Mostrar próximos passos
 
 ### Instalação Manual
 
@@ -150,17 +162,17 @@ O script irá:
 ### Execução Manual
 
 ```bash
-# Executa backup e retenção (processo completo) com logs em /var/log
-sudo ./run_sudo.sh
+# Processo completo (backup + retenção)
+./run.sh                    # Logs em ./logs/
+sudo ./run_sudo.sh          # Logs em /var/log/
 
-# Executa apenas backup
-sudo ./run_sudo.sh --backup-only
+# Apenas backup
+./run.sh --backup-only      # Logs em ./logs/
+sudo ./run_sudo.sh --backup-only  # Logs em /var/log/
 
-# Executa apenas retenção
-sudo ./run_sudo.sh --retention-only
-
-# Alternativa sem sudo (logs em ./logs/)
-./run.sh --backup-only
+# Apenas retenção
+./run.sh --retention-only   # Logs em ./logs/
+sudo ./run_sudo.sh --retention-only  # Logs em /var/log/
 ```
 
 ### Configuração no Cron
@@ -186,6 +198,8 @@ crontab -e
 # Adicionar linha:
 0 2 * * * /caminho/para/db-backup/run.sh >/dev/null 2>&1
 ```
+
+**Importante:** Use caminhos absolutos no cron e certifique-se de que `./setup.sh` foi executado primeiro.
 
 ## Pré-requisitos
 
