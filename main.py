@@ -64,7 +64,7 @@ def run_full_process():
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Sistema de Backup Automático PostgreSQL para S3',
+        description='Sistema de Backup Automático PostgreSQL para S3 ou GCS',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Exemplos de uso:

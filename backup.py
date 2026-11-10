@@ -1,22 +1,17 @@
 import os
 import subprocess
 import gzip
-import boto3
 from datetime import datetime
 from config import Config, setup_logging
+from storage import get_storage
 
 class DatabaseBackup:
     def __init__(self):
         self.logger = setup_logging()
         Config.validate()
-        
-        self.s3_client = boto3.client(
-            's3',
-            aws_access_key_id=Config.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=Config.AWS_SECRET_ACCESS_KEY,
-            region_name=Config.AWS_REGION
-        )
-        
+
+        self.storage = get_storage()
+
         os.makedirs(Config.BACKUP_DIR, exist_ok=True)
     
     def get_all_databases(self):
@@ -112,28 +107,19 @@ class DatabaseBackup:
             self.logger.error(f"Erro ao comprimir backup {backup_path}: {e}")
             raise
     
-    def upload_to_s3(self, local_file_path):
+    def upload_backup(self, local_file_path):
         filename = os.path.basename(local_file_path)
-        s3_key = f"{Config.SERVER_NAME}/{filename}"
-        
+        key = f"{Config.SERVER_NAME}/{filename}"
+        provider = Config.STORAGE_PROVIDER.upper()
+
         try:
-            self.logger.info(f"Enviando {filename} para S3 no diretório {Config.SERVER_NAME}...")
-            
-            self.s3_client.upload_file(
-                local_file_path,
-                Config.S3_BUCKET_NAME,
-                s3_key,
-                ExtraArgs={
-                    'ServerSideEncryption': 'AES256',
-                    'StorageClass': 'STANDARD_IA'
-                }
-            )
-            
-            self.logger.info(f"Upload concluído: s3://{Config.S3_BUCKET_NAME}/{s3_key}")
-            return s3_key
-            
+            self.logger.info(f"Enviando {filename} para {provider} no diretório {Config.SERVER_NAME}...")
+            uri = self.storage.upload(local_file_path, key)
+            self.logger.info(f"Upload concluído: {uri}")
+            return key
+
         except Exception as e:
-            self.logger.error(f"Erro no upload para S3: {e}")
+            self.logger.error(f"Erro no upload para {provider}: {e}")
             raise
     
     def cleanup_local_files(self, file_path):
@@ -147,10 +133,10 @@ class DatabaseBackup:
         try:
             backup_path = self.create_pg_dump(database_name)
             compressed_path = self.compress_backup(backup_path)
-            s3_key = self.upload_to_s3(compressed_path)
+            key = self.upload_backup(compressed_path)
             self.cleanup_local_files(compressed_path)
-            
-            return s3_key
+
+            return key
             
         except Exception as e:
             self.logger.error(f"Falha no backup de {database_name}: {e}")
@@ -179,8 +165,8 @@ class DatabaseBackup:
         for db_name in databases_to_backup:
                 
             try:
-                s3_key = self.backup_database(db_name)
-                successful_backups.append((db_name, s3_key))
+                key = self.backup_database(db_name)
+                successful_backups.append((db_name, key))
                 self.logger.info(f"✓ Backup de {db_name} concluído com sucesso")
                 
             except Exception as e:

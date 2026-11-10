@@ -1,6 +1,6 @@
-# Sistema de Backup Automático PostgreSQL para S3
+# Sistema de Backup Automático PostgreSQL para S3 / GCS
 
-Sistema completo para backup automático de bancos de dados PostgreSQL com upload para AWS S3 e gerenciamento de retenção.
+Sistema completo para backup automático de bancos de dados PostgreSQL com upload para AWS S3 ou Google Cloud Storage (GCS) e gerenciamento de retenção.
 
 **🎯 Arquitetura Simples:**
 - **`setup.sh`** - Instala tudo automaticamente (execute uma vez)
@@ -10,16 +10,17 @@ Sistema completo para backup automático de bancos de dados PostgreSQL com uploa
 
 - ✅ Backup automático de múltiplos databases PostgreSQL
 - ✅ Compressão dos backups (gzip)
-- ✅ Upload seguro para AWS S3 com criptografia
-- ✅ Organização por servidor (diretórios separados no S3)
+- ✅ Upload seguro para AWS S3 ou Google Cloud Storage com criptografia
+- ✅ Provider selecionável via `STORAGE_PROVIDER` (`s3` ou `gcs`)
+- ✅ Organização por servidor (diretórios separados no bucket)
 - ✅ Gerenciamento automático de retenção (15 dias configurável)
 - ✅ Logs detalhados de todo o processo
 - ✅ Execução via cron
 - ✅ Tratamento robusto de erros
 
-## Organização dos Backups no S3
+## Organização dos Backups no Bucket
 
-Os backups são organizados por servidor no S3, criando uma estrutura hierárquica:
+Os backups são organizados por servidor no bucket (S3 ou GCS), criando uma estrutura hierárquica:
 
 ```
 seu-bucket-backup/
@@ -69,11 +70,13 @@ db-backup/
 ├── backup.py                   # Módulo de backup
 ├── retention.py                # Módulo de retenção
 ├── config.py                   # Configurações
+├── storage.py                  # Camada de storage (S3 / GCS)
 ├── requirements.txt            # Dependências Python
 ├── .env.example               # Exemplo de configuração
 ├── test_dependencies.py        # Teste de dependências
 ├── test_backup_dry_run.py      # Teste sem PostgreSQL
 ├── test_s3_connection.py       # Teste de conexão S3
+├── test_gcs_connection.py      # Teste de conexão GCS
 ├── status.sh                   # Script de verificação de status
 └── README.md                  # Esta documentação
 ```
@@ -91,7 +94,7 @@ O script irá:
 - ✅ Verificar e instalar Python 3 e python3-venv
 - ✅ Verificar e instalar PostgreSQL client tools
 - ✅ Criar ambiente virtual Python
-- ✅ Instalar todas as dependências (boto3, psycopg2, python-dotenv)
+- ✅ Instalar todas as dependências (boto3, google-cloud-storage, psycopg2, python-dotenv)
 - ✅ Criar arquivo .env de exemplo
 - ✅ Configurar diretórios e permissões
 - ✅ Executar testes de validação
@@ -116,11 +119,20 @@ O script irá:
    DB_PASSWORD=sua_senha
    # DB_NAMES=database1,database2,database3  # Opcional: se não especificado, faz backup de todos os databases
 
-   # Configurações AWS S3
+   # Provider de storage: s3 (padrão) ou gcs
+   STORAGE_PROVIDER=s3
+
+   # Configurações AWS S3 (STORAGE_PROVIDER=s3)
    AWS_ACCESS_KEY_ID=sua_access_key
    AWS_SECRET_ACCESS_KEY=sua_secret_key
    AWS_REGION=us-east-1
    S3_BUCKET_NAME=seu-bucket-backup
+
+   # Configurações GCS (STORAGE_PROVIDER=gcs)
+   # GCS_BUCKET_NAME=seu-bucket-backup
+   # GCS_PROJECT_ID=seu-projeto-gcp
+   # GCS_CREDENTIALS_FILE=/caminho/para/service-account.json
+   # GCS_STORAGE_CLASS=NEARLINE
 
    # Configurações de retenção
    BACKUP_RETENTION_DAYS=15
@@ -206,7 +218,7 @@ crontab -e
 ### Sistema
 - Python 3.6+
 - PostgreSQL client tools (`pg_dump`)
-- Acesso de rede ao PostgreSQL e AWS S3
+- Acesso de rede ao PostgreSQL e ao storage (AWS S3 ou GCS)
 
 ### Permissões AWS S3
 O usuário AWS precisa das seguintes permissões:
@@ -230,6 +242,30 @@ O usuário AWS precisa das seguintes permissões:
     ]
 }
 ```
+
+### Google Cloud Storage
+
+Defina `STORAGE_PROVIDER=gcs` e `GCS_BUCKET_NAME`. Autenticação:
+
+- **`GCS_CREDENTIALS_FILE`**: caminho para a chave JSON de uma service account
+- **Sem `GCS_CREDENTIALS_FILE`**: usa Application Default Credentials (service account anexada à VM no GCE/GKE, `GOOGLE_APPLICATION_CREDENTIALS` ou `gcloud auth application-default login`)
+
+A service account precisa de `roles/storage.objectAdmin` no bucket (ou das permissões `storage.objects.create`, `storage.objects.get`, `storage.objects.list` e `storage.objects.delete`):
+
+```bash
+gcloud storage buckets create gs://seu-bucket-backup \
+  --location=southamerica-east1 --default-storage-class=NEARLINE --uniform-bucket-level-access
+
+gcloud iam service-accounts create backup-postgres
+
+gcloud storage buckets add-iam-policy-binding gs://seu-bucket-backup \
+  --member=serviceAccount:backup-postgres@SEU-PROJETO.iam.gserviceaccount.com \
+  --role=roles/storage.objectAdmin
+```
+
+`GCS_STORAGE_CLASS` aceita `STANDARD`, `NEARLINE` (padrão), `COLDLINE` ou `ARCHIVE`. Os objetos são criptografados em repouso pelo GCS automaticamente. Observe que `NEARLINE`/`COLDLINE`/`ARCHIVE` têm duração mínima de armazenamento (30/90/365 dias): com retenção de 15 dias, a exclusão antecipada é cobrada como se o objeto tivesse ficado o período mínimo — use `STANDARD` se isso pesar.
+
+Teste: `python3 test_gcs_connection.py` (guia: `python3 test_gcs_connection.py --guide`).
 
 ### PostgreSQL
 - Usuário com permissão de leitura nos databases
@@ -320,6 +356,12 @@ sudo yum install postgresql
 2. Verifique permissões AWS
 3. Verifique região configurada
 
+### Erro: GCS 403 / credenciais não encontradas
+1. Verifique `GCS_CREDENTIALS_FILE` (caminho absoluto, legível pelo usuário do cron)
+2. Sem arquivo de chave, confirme que a VM tem service account anexada com escopo `cloud-platform`
+3. Confirme `roles/storage.objectAdmin` da service account no bucket
+4. Rode `python3 test_gcs_connection.py`
+
 ### Logs não aparecem
 1. Verifique permissões da pasta `/var/log`
 2. Execute manualmente para ver erros:
@@ -336,7 +378,7 @@ BACKUP_DIR = '/seu/diretorio/temporario'
 ```
 
 ### Alterar classe de storage S3
-No arquivo `backup.py`, método `upload_to_s3`:
+No arquivo `storage.py`, método `S3Storage.upload`:
 ```python
 'StorageClass': 'GLACIER'  # ou 'DEEP_ARCHIVE'
 ```

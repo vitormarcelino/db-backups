@@ -1,51 +1,43 @@
-import boto3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from config import Config, setup_logging
+from storage import get_storage
 
 class BackupRetentionManager:
     def __init__(self):
         self.logger = setup_logging()
         Config.validate()
-        
-        self.s3_client = boto3.client(
-            's3',
-            aws_access_key_id=Config.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=Config.AWS_SECRET_ACCESS_KEY,
-            region_name=Config.AWS_REGION
-        )
-    
+
+        self.storage = get_storage()
+        self.provider = Config.STORAGE_PROVIDER.upper()
+
     def list_backup_objects(self):
         try:
             prefix = f"{Config.SERVER_NAME}/"
-            response = self.s3_client.list_objects_v2(
-                Bucket=Config.S3_BUCKET_NAME,
-                Prefix=prefix
-            )
-            
-            if 'Contents' not in response:
-                self.logger.info(f"Nenhum backup encontrado no S3 para o servidor {Config.SERVER_NAME}")
+            objects = self.storage.list(prefix)
+
+            if not objects:
+                self.logger.info(f"Nenhum backup encontrado no {self.provider} para o servidor {Config.SERVER_NAME}")
                 return []
-            
-            objects = response['Contents']
-            self.logger.info(f"Encontrados {len(objects)} objetos de backup no S3 para o servidor {Config.SERVER_NAME}")
+
+            self.logger.info(f"Encontrados {len(objects)} objetos de backup no {self.provider} para o servidor {Config.SERVER_NAME}")
             
             return objects
             
         except Exception as e:
-            self.logger.error(f"Erro ao listar objetos no S3: {e}")
+            self.logger.error(f"Erro ao listar objetos no {self.provider}: {e}")
             raise
     
     def calculate_retention_date(self):
-        retention_date = datetime.now() - timedelta(days=Config.BACKUP_RETENTION_DAYS)
-        self.logger.info(f"Data limite para retenção: {retention_date.strftime('%Y-%m-%d %H:%M:%S')}")
+        retention_date = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=Config.BACKUP_RETENTION_DAYS)
+        self.logger.info(f"Data limite para retenção (UTC): {retention_date.strftime('%Y-%m-%d %H:%M:%S')}")
         return retention_date
     
     def get_expired_backups(self, objects, retention_date):
         expired_objects = []
         
         for obj in objects:
-            last_modified = obj['LastModified'].replace(tzinfo=None)
-            
+            last_modified = obj['LastModified']
+
             if last_modified < retention_date:
                 expired_objects.append({
                     'Key': obj['Key'],
@@ -67,10 +59,7 @@ class BackupRetentionManager:
         
         for obj in expired_objects:
             try:
-                self.s3_client.delete_object(
-                    Bucket=Config.S3_BUCKET_NAME,
-                    Key=obj['Key']
-                )
+                self.storage.delete(obj['Key'])
                 
                 deleted_objects.append(obj)
                 total_size_freed += obj['Size']
@@ -95,10 +84,10 @@ class BackupRetentionManager:
 === RELATÓRIO DE RETENÇÃO DE BACKUPS ===
 Data/Hora: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Servidor: {Config.SERVER_NAME}
-Bucket S3: {Config.S3_BUCKET_NAME}
+Storage: {self.storage.uri(Config.SERVER_NAME + '/')}
 Período de retenção: {Config.BACKUP_RETENTION_DAYS} dias
 
-Total de backups no S3: {total_objects}
+Total de backups no storage: {total_objects}
 Backups expirados encontrados: {expired_count}
 Backups removidos com sucesso: {deleted_count}
 Backups mantidos: {remaining_objects}

@@ -5,4 +5,5 @@ __pycache__/
 *.pyc
 *.pyo
 *.log
-/tmp/db_backups/
+/tmp/db_backups/service-account*.json
+gcs-credentials*.json

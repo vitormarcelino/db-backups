@@ -17,7 +17,14 @@ class Config:
     AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
     AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
     S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
-    
+
+    STORAGE_PROVIDER = os.getenv('STORAGE_PROVIDER', 's3').strip().lower()
+
+    GCS_BUCKET_NAME = os.getenv('GCS_BUCKET_NAME')
+    GCS_PROJECT_ID = os.getenv('GCS_PROJECT_ID') or None
+    GCS_CREDENTIALS_FILE = os.getenv('GCS_CREDENTIALS_FILE') or None
+    GCS_STORAGE_CLASS = os.getenv('GCS_STORAGE_CLASS', 'NEARLINE') or None
+
     BACKUP_RETENTION_DAYS = int(os.getenv('BACKUP_RETENTION_DAYS', '15'))
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
     
@@ -26,11 +33,18 @@ class Config:
     
     @classmethod
     def validate(cls):
-        required_vars = [
-            'DB_PASSWORD', 'AWS_ACCESS_KEY_ID', 
-            'AWS_SECRET_ACCESS_KEY', 'S3_BUCKET_NAME'
-        ]
-        
+        if cls.STORAGE_PROVIDER == 's3':
+            required_vars = [
+                'DB_PASSWORD', 'AWS_ACCESS_KEY_ID',
+                'AWS_SECRET_ACCESS_KEY', 'S3_BUCKET_NAME'
+            ]
+        elif cls.STORAGE_PROVIDER == 'gcs':
+            required_vars = ['DB_PASSWORD', 'GCS_BUCKET_NAME']
+            if cls.GCS_CREDENTIALS_FILE and not os.path.isfile(cls.GCS_CREDENTIALS_FILE):
+                raise ValueError(f"GCS_CREDENTIALS_FILE não encontrado: {cls.GCS_CREDENTIALS_FILE}")
+        else:
+            raise ValueError(f"STORAGE_PROVIDER inválido: {cls.STORAGE_PROVIDER} (use 's3' ou 'gcs')")
+
         missing_vars = []
         for var in required_vars:
             if not getattr(cls, var):
@@ -38,8 +52,6 @@ class Config:
         
         if missing_vars:
             raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
-        
-        # DB_NAMES é opcional - se não especificado, fará backup de todos os databases
 
 def setup_logging():
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
