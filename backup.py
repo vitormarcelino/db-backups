@@ -1,9 +1,19 @@
 import os
+import shutil
 import subprocess
+import tempfile
 import gzip
 from datetime import datetime
 from config import Config, setup_logging
 from storage import get_storage
+
+LIST_DATABASES_SQL = (
+    "SELECT datname FROM pg_database "
+    "WHERE NOT datistemplate AND datname NOT IN ('postgres', 'template0', 'template1');"
+)
+
+DOCKER_PG_SHELL = 'PGPASSWORD="$POSTGRES_PASSWORD" exec "$0" -U "${POSTGRES_USER:-postgres}" "$@"'
+
 
 class DatabaseBackup:
     def __init__(self):
@@ -13,107 +23,121 @@ class DatabaseBackup:
         self.storage = get_storage()
 
         os.makedirs(Config.BACKUP_DIR, exist_ok=True)
-    
+
+    def _host_env(self):
+        env = os.environ.copy()
+        env['PGPASSWORD'] = Config.DB_PASSWORD
+        return env
+
+    def _host_command(self, binary, *args):
+        return [binary, '-h', Config.DB_HOST, '-p', Config.DB_PORT, '-U', Config.DB_USER, *args]
+
+    def _docker_command(self, container, binary, *args):
+        return ['docker', 'exec', container, 'sh', '-c', DOCKER_PG_SHELL, binary, *args]
+
+    def _run_list_databases(self, command, env, label):
+        try:
+            self.logger.info(f"Listando databases disponíveis em {label}...")
+            result = subprocess.run(command, env=env, capture_output=True, text=True, check=True)
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Erro ao listar databases em {label}: {e}")
+            self.logger.error(f"STDERR: {e.stderr}")
+            raise
+
+        databases = [db.strip() for db in result.stdout.split('\n') if db.strip()]
+        if databases:
+            self.logger.info(f"Databases encontrados em {label}: {', '.join(databases)}")
+        else:
+            self.logger.warning(f"Nenhum database disponível para backup em {label}")
+        return databases
+
     def get_all_databases(self):
-        """Lista todos os databases disponíveis no servidor PostgreSQL"""
-        list_command = [
-            'psql',
-            '-h', Config.DB_HOST,
-            '-p', Config.DB_PORT,
-            '-U', Config.DB_USER,
-            '-d', 'postgres',  # conecta ao database padrão
-            '-t',  # sem cabeçalhos
-            '-c', "SELECT datname FROM pg_database WHERE NOT datistemplate AND datname NOT IN ('postgres', 'template0', 'template1');"
-        ]
-        
-        env = os.environ.copy()
-        env['PGPASSWORD'] = Config.DB_PASSWORD
-        
-        try:
-            self.logger.info("Listando todos os databases disponíveis...")
-            result = subprocess.run(
-                list_command,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            
-            # Parse da saída - remove espaços e linhas vazias
-            databases = [db.strip() for db in result.stdout.split('\n') if db.strip()]
-            
-            if not databases:
-                self.logger.warning("Nenhum database disponível para backup encontrado")
-                return []
-                
-            self.logger.info(f"Databases encontrados: {', '.join(databases)}")
-            return databases
-            
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"Erro ao listar databases: {e}")
-            self.logger.error(f"STDERR: {e.stderr}")
-            raise
-    
-    def create_pg_dump(self, database_name):
+        command = self._host_command('psql', '-d', 'postgres', '-t', '-c', LIST_DATABASES_SQL)
+        return self._run_list_databases(command, self._host_env(), Config.DB_HOST)
+
+    def get_container_databases(self, container):
+        command = self._docker_command(container, 'psql', '-d', 'postgres', '-At', '-c', LIST_DATABASES_SQL)
+        return self._run_list_databases(command, None, f"container {container}")
+
+    def discover_postgres_containers(self):
+        result = subprocess.run(['docker', 'ps', '-q'], capture_output=True, text=True, check=True)
+        ids = result.stdout.split()
+        if not ids:
+            return []
+
+        result = subprocess.run(
+            ['docker', 'inspect', '--format', '{{.Name}}|{{range .Config.Env}}{{.}};{{end}}', *ids],
+            capture_output=True, text=True, check=True
+        )
+
+        containers = []
+        for line in result.stdout.splitlines():
+            name, _, env = line.partition('|')
+            env_keys = {item.split('=', 1)[0] for item in env.split(';') if item}
+            if 'PG_MAJOR' in env_keys or 'PG_VERSION' in env_keys:
+                containers.append(name.lstrip('/'))
+
+        return sorted(containers)
+
+    def _dump_to_gzip(self, command, env, output_path, label):
+        with tempfile.TemporaryFile() as stderr_file:
+            try:
+                with gzip.open(output_path, 'wb') as gz:
+                    process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=stderr_file)
+                    shutil.copyfileobj(process.stdout, gz, 1024 * 1024)
+                    process.stdout.close()
+                    returncode = process.wait()
+            except Exception:
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+                raise
+
+            if returncode != 0:
+                stderr_file.seek(0)
+                stderr = stderr_file.read().decode(errors='replace')
+                os.remove(output_path)
+                self.logger.error(f"STDERR: {stderr}")
+                raise RuntimeError(f"pg_dump de {label} terminou com código {returncode}")
+
+        self.logger.info(f"Backup criado e comprimido: {output_path}")
+        return output_path
+
+    def _backup_path(self, database_name, container=None):
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        backup_filename = f"{database_name}_{timestamp}.sql"
-        backup_path = os.path.join(Config.BACKUP_DIR, backup_filename)
-        
-        dump_command = [
-            'pg_dump',
-            '-h', Config.DB_HOST,
-            '-p', Config.DB_PORT,
-            '-U', Config.DB_USER,
-            '-d', database_name,
-            '-f', backup_path,
-            '--verbose',
-            '--no-password'
-        ]
-        
-        env = os.environ.copy()
-        env['PGPASSWORD'] = Config.DB_PASSWORD
-        
+        prefix = f"{container}__" if container else ''
+        return os.path.join(Config.BACKUP_DIR, f"{prefix}{database_name}_{timestamp}.sql.gz")
+
+    def create_pg_dump(self, database_name, container=None):
+        output_path = self._backup_path(database_name, container)
+
+        if container:
+            label = f"{container}/{database_name}"
+            command = self._docker_command(container, 'pg_dump', '-d', database_name)
+            env = None
+        else:
+            label = database_name
+            command = self._host_command('pg_dump', '-d', database_name, '--no-password')
+            env = self._host_env()
+
+        self.logger.info(f"Iniciando backup do database: {label}")
         try:
-            self.logger.info(f"Iniciando backup do database: {database_name}")
-            result = subprocess.run(
-                dump_command,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            
-            self.logger.info(f"Backup criado com sucesso: {backup_path}")
-            return backup_path
-            
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"Erro ao criar backup de {database_name}: {e}")
-            self.logger.error(f"STDERR: {e.stderr}")
-            raise
-    
-    def compress_backup(self, backup_path):
-        compressed_path = f"{backup_path}.gz"
-        
-        try:
-            with open(backup_path, 'rb') as f_in:
-                with gzip.open(compressed_path, 'wb') as f_out:
-                    f_out.writelines(f_in)
-            
-            os.remove(backup_path)
-            self.logger.info(f"Backup comprimido: {compressed_path}")
-            return compressed_path
-            
+            return self._dump_to_gzip(command, env, output_path, label)
         except Exception as e:
-            self.logger.error(f"Erro ao comprimir backup {backup_path}: {e}")
+            self.logger.error(f"Erro ao criar backup de {label}: {e}")
             raise
-    
-    def upload_backup(self, local_file_path):
+
+    def upload_backup(self, local_file_path, container=None):
         filename = os.path.basename(local_file_path)
-        key = f"{Config.SERVER_NAME}/{filename}"
+        if container:
+            filename = filename.split('__', 1)[1]
+            directory = f"{Config.SERVER_NAME}/{container}"
+        else:
+            directory = Config.SERVER_NAME
+        key = f"{directory}/{filename}"
         provider = Config.STORAGE_PROVIDER.upper()
 
         try:
-            self.logger.info(f"Enviando {filename} para {provider} no diretório {Config.SERVER_NAME}...")
+            self.logger.info(f"Enviando {filename} para {provider} no diretório {directory}...")
             uri = self.storage.upload(local_file_path, key)
             self.logger.info(f"Upload concluído: {uri}")
             return key
@@ -121,81 +145,103 @@ class DatabaseBackup:
         except Exception as e:
             self.logger.error(f"Erro no upload para {provider}: {e}")
             raise
-    
+
     def cleanup_local_files(self, file_path):
         try:
             os.remove(file_path)
             self.logger.info(f"Arquivo local removido: {file_path}")
         except Exception as e:
             self.logger.warning(f"Erro ao remover arquivo local {file_path}: {e}")
-    
-    def backup_database(self, database_name):
-        try:
-            backup_path = self.create_pg_dump(database_name)
-            compressed_path = self.compress_backup(backup_path)
-            key = self.upload_backup(compressed_path)
-            self.cleanup_local_files(compressed_path)
 
-            return key
-            
+    def backup_database(self, database_name, container=None):
+        compressed_path = None
+        try:
+            compressed_path = self.create_pg_dump(database_name, container)
+            return self.upload_backup(compressed_path, container)
+
         except Exception as e:
             self.logger.error(f"Falha no backup de {database_name}: {e}")
             raise
-    
+
+        finally:
+            if compressed_path and os.path.exists(compressed_path):
+                self.cleanup_local_files(compressed_path)
+
+    def _configured_databases(self):
+        return [db.strip() for db in Config.DB_NAMES if db.strip()]
+
+    def _build_jobs(self):
+        configured = self._configured_databases()
+
+        if Config.BACKUP_MODE == 'docker':
+            containers = Config.DOCKER_CONTAINERS or self.discover_postgres_containers()
+            if Config.DOCKER_CONTAINERS:
+                self.logger.info(f"Usando containers configurados: {', '.join(containers)}")
+            else:
+                self.logger.info(f"Containers PostgreSQL detectados: {', '.join(containers) or 'nenhum'}")
+
+            jobs = []
+            failed = []
+            for container in containers:
+                try:
+                    databases = self.get_container_databases(container)
+                except Exception as e:
+                    failed.append((container, str(e)))
+                    continue
+                if configured:
+                    databases = [db for db in databases if db in configured]
+                jobs.extend((container, db) for db in databases)
+            return jobs, failed
+
+        if configured:
+            self.logger.info(f"Usando databases configurados: {', '.join(configured)}")
+            return [(None, db) for db in configured], []
+
+        self.logger.info("DB_NAMES não configurado - fazendo backup de todos os databases")
+        return [(None, db) for db in self.get_all_databases()], []
+
     def backup_all_databases(self):
         successful_backups = []
-        failed_backups = []
-        
-        # Determina quais databases fazer backup
-        if Config.DB_NAMES and Config.DB_NAMES != ['']:
-            # Usa lista configurada
-            databases_to_backup = [db.strip() for db in Config.DB_NAMES if db.strip()]
-            self.logger.info(f"Usando databases configurados: {', '.join(databases_to_backup)}")
-        else:
-            # Lista todos os databases automaticamente
-            self.logger.info("DB_NAMES não configurado - fazendo backup de todos os databases")
-            databases_to_backup = self.get_all_databases()
-        
-        if not databases_to_backup:
+        jobs, failed_backups = self._build_jobs()
+
+        if not jobs and not failed_backups:
             self.logger.warning("Nenhum database encontrado para backup")
             return [], []
-        
+
         self.logger.info("Iniciando processo de backup de todos os databases")
-        
-        for db_name in databases_to_backup:
-                
+
+        for container, db_name in jobs:
+            label = f"{container}/{db_name}" if container else db_name
             try:
-                key = self.backup_database(db_name)
-                successful_backups.append((db_name, key))
-                self.logger.info(f"✓ Backup de {db_name} concluído com sucesso")
-                
+                key = self.backup_database(db_name, container)
+                successful_backups.append((label, key))
+                self.logger.info(f"✓ Backup de {label} concluído com sucesso")
+
             except Exception as e:
-                failed_backups.append((db_name, str(e)))
-                self.logger.error(f"✗ Falha no backup de {db_name}")
-        
+                failed_backups.append((label, str(e)))
+                self.logger.error(f"✗ Falha no backup de {label}")
+
         self.logger.info(f"Processo concluído. Sucessos: {len(successful_backups)}, Falhas: {len(failed_backups)}")
-        
+
         if failed_backups:
             self.logger.error("Databases com falha:")
-            for db_name, error in failed_backups:
-                self.logger.error(f"  - {db_name}: {error}")
-        
+            for label, error in failed_backups:
+                self.logger.error(f"  - {label}: {error}")
+
         return successful_backups, failed_backups
+
 
 def main():
     try:
         backup_manager = DatabaseBackup()
         successful, failed = backup_manager.backup_all_databases()
-        
-        if failed:
-            exit(1)
-        else:
-            exit(0)
-            
+        exit(1 if failed else 0)
+
     except Exception as e:
         logger = setup_logging()
         logger.error(f"Erro crítico no processo de backup: {e}")
         exit(1)
+
 
 if __name__ == "__main__":
     main()

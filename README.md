@@ -39,6 +39,17 @@ O nome do servidor é determinado por:
 1. Variável `SERVER_NAME` no arquivo `.env` (se especificada)
 2. Hostname do sistema (se `SERVER_NAME` não estiver definida)
 
+## Modo Docker
+
+Com `BACKUP_MODE=docker`, o `pg_dump` roda dentro de cada container PostgreSQL via `docker exec`, garantindo a mesma versão do servidor e dispensando portas expostas, `postgresql-client` no host e `DB_PASSWORD`. O usuário é lido de `POSTGRES_USER` do container (padrão `postgres`).
+
+```env
+BACKUP_MODE=docker
+DOCKER_CONTAINERS=postgres-app1,postgres-app2
+```
+
+Sem `DOCKER_CONTAINERS`, todos os containers em execução baseados na imagem oficial do PostgreSQL são detectados automaticamente. `DB_NAMES`, se definido, filtra os databases em todos os containers. Os arquivos ficam em `SERVER_NAME/<container>/<database>_<timestamp>.sql.gz`.
+
 ## Seleção de Databases
 
 O sistema oferece duas formas de determinar quais databases fazer backup:

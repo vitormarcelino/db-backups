@@ -20,6 +20,9 @@ class Config:
 
     STORAGE_PROVIDER = os.getenv('STORAGE_PROVIDER', 's3').strip().lower()
 
+    BACKUP_MODE = os.getenv('BACKUP_MODE', 'host').strip().lower()
+    DOCKER_CONTAINERS = [c.strip() for c in os.getenv('DOCKER_CONTAINERS', '').split(',') if c.strip()]
+
     GCS_BUCKET_NAME = os.getenv('GCS_BUCKET_NAME')
     GCS_PROJECT_ID = os.getenv('GCS_PROJECT_ID') or None
     GCS_CREDENTIALS_FILE = os.getenv('GCS_CREDENTIALS_FILE') or None
@@ -33,13 +36,17 @@ class Config:
     
     @classmethod
     def validate(cls):
+        if cls.BACKUP_MODE == 'host':
+            required_vars = ['DB_PASSWORD']
+        elif cls.BACKUP_MODE == 'docker':
+            required_vars = []
+        else:
+            raise ValueError(f"BACKUP_MODE inválido: {cls.BACKUP_MODE} (use 'host' ou 'docker')")
+
         if cls.STORAGE_PROVIDER == 's3':
-            required_vars = [
-                'DB_PASSWORD', 'AWS_ACCESS_KEY_ID',
-                'AWS_SECRET_ACCESS_KEY', 'S3_BUCKET_NAME'
-            ]
+            required_vars += ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'S3_BUCKET_NAME']
         elif cls.STORAGE_PROVIDER == 'gcs':
-            required_vars = ['DB_PASSWORD', 'GCS_BUCKET_NAME']
+            required_vars += ['GCS_BUCKET_NAME']
             if cls.GCS_CREDENTIALS_FILE and not os.path.isfile(cls.GCS_CREDENTIALS_FILE):
                 raise ValueError(f"GCS_CREDENTIALS_FILE não encontrado: {cls.GCS_CREDENTIALS_FILE}")
         else:
